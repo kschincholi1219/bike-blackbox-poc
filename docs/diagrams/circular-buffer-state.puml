@@ -1,0 +1,111 @@
+@startuml circular-buffer-state
+!theme plain
+title Bike Black Box – Circular Buffer State Machine
+skinparam backgroundColor #FAFAFA
+skinparam stateBackgroundColor #E8F4FD
+skinparam stateBorderColor #2980B9
+skinparam stateArrowColor #2C3E50
+skinparam noteBackgroundColor #FEF9E7
+skinparam noteBorderColor #F39C12
+
+' ──────────────────────────────────────────
+' STATES
+' ──────────────────────────────────────────
+[*] --> Idle : System boot\nRecovery complete\nFile lists rebuilt
+
+state Idle {
+  Idle : entry / load existing file lists from disk
+  Idle : do   / monitor disk usage (passive)
+  Idle : exit / --
+}
+
+state Writing {
+  Writing : entry / register new chunk in file list
+  Writing : do   / append (filename, timestamp, size_mb) to list
+  Writing : do   / accumulate total_mb
+  Writing : exit / check total_mb vs threshold
+}
+
+state Threshold_Exceeded {
+  Threshold_Exceeded : entry / find oldest file (min timestamp)
+  Threshold_Exceeded : do   / rename file → file.deleting  [atomic]
+  Threshold_Exceeded : do   / os.remove(file.deleting)
+  Threshold_Exceeded : do   / subtract size_mb from total_mb
+  Threshold_Exceeded : exit / log deletion to disk_usage.json
+}
+
+state Deleting {
+  Deleting : entry / execute atomic delete sequence
+  Deleting : do   / rename → .deleting
+  Deleting : do   / remove .deleting
+  Deleting : do   / update stats (deleted++, freed_mb += sz)
+  Deleting : exit / persist disk_usage.json to /blackbox/state/
+}
+
+state Error {
+  Error : entry / log exception to /blackbox/logs/storage.log
+  Error : do   / skip current deletion attempt
+  Error : exit / schedule retry on next chunk write
+}
+
+' ──────────────────────────────────────────
+' TRANSITIONS
+' ──────────────────────────────────────────
+Idle --> Writing            : on_new_chunk(camera, filename, size_mb)\ncalled by camera service
+
+Writing --> Idle            : total_mb ≤ threshold (2500 MB)\n[no deletion needed]
+
+Writing --> Threshold_Exceeded : total_mb > threshold (2500 MB)\n[must free space]
+
+Threshold_Exceeded --> Deleting     : oldest file identified\n[atomic rename succeeds]
+
+Threshold_Exceeded --> Threshold_Exceeded : total_mb still > threshold\nafter one deletion\n[loop until below threshold]
+
+Threshold_Exceeded --> Error        : oldest file not found\nor rename/remove fails
+
+Deleting --> Threshold_Exceeded     : total_mb still > threshold\n[delete another chunk]
+
+Deleting --> Idle                   : total_mb ≤ threshold\n[buffer back in bounds]
+
+Error --> Idle                      : exception logged\ncontinue without deletion
+
+' ──────────────────────────────────────────
+' NOTES
+' ──────────────────────────────────────────
+note right of Idle
+  File lists are rebuilt from
+  filesystem on each boot
+  (no in-memory state is persisted).
+end note
+
+note right of Writing
+  Both front and rear camera lists
+  are maintained separately but
+  checked against a single combined
+  threshold of 2,500 MB (~1 hour
+  of dual 5 Mbps video).
+end note
+
+note right of Threshold_Exceeded
+  Oldest file is determined by
+  comparing the earliest timestamp
+  across both front and rear lists.
+  Paired front+rear chunks are NOT
+  deleted together – each is treated
+  independently by timestamp.
+end note
+
+note right of Deleting
+  Atomic delete on ext4:
+  1. rename(file, file.deleting)
+     — visible in directory but
+       flagged as in-progress
+  2. remove(file.deleting)
+     — final unlink
+
+  If power is lost between steps 1
+  and 2, the .deleting file is an
+  orphan cleaned up on next boot.
+end note
+
+@enduml

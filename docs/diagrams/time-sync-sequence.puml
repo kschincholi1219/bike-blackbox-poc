@@ -1,0 +1,95 @@
+@startuml time-sync-sequence
+!theme plain
+title Bike Black Box – GPS Time Synchronisation Sequence
+skinparam backgroundColor #FAFAFA
+skinparam sequenceArrowColor #2C3E50
+skinparam sequenceLifeLineBorderColor #2980B9
+skinparam sequenceParticipantBackgroundColor #E8F4FD
+skinparam sequenceParticipantBorderColor #2980B9
+skinparam noteBackgroundColor #FEF9E7
+skinparam noteBorderColor #F39C12
+skinparam sequenceGroupBackgroundColor #F4F6F7
+
+autonumber
+
+participant "GPSLoggerService\n(gps_logger.py)" as GPSS
+participant "TimeSync\n(time_sync.py)" as TS
+participant "GPS Module\n(u-blox M8N)" as GMOD
+participant "System Clock\n(Linux RTC)" as SYSCLK
+participant "SD Card\n(/blackbox/)" as SD
+
+== PHASE 1 – BOOT-TIME SYNC (~30–60 s after boot) ==
+
+note over SYSCLK
+  System boots with stale RTC.
+  Example: RTC = 2026-07-06 08:30:00
+           Actual = 2026-07-06 14:32:15
+           Offset  = –6 h 02 m 15 s
+end note
+
+GPSS -> GMOD  : open serial /dev/ttyUSB0\n9600 baud, timeout=1 s
+
+loop Waiting for first valid GPS fix (cold-start ≤ 60 s)
+  GMOD --> GPSS : NMEA sentences (possibly no-fix)
+  GPSS -> GPSS  : parse → fix_quality == 0 → skip
+end
+
+GMOD --> GPSS  : $GPRMC,143215.000,A,...*xx\n(first valid fix, fix_quality = 1)
+
+GPSS -> TS    : sample_gps(sentence)
+TS   -> TS    : parse $GPRMC → gps_time (Unix epoch)
+TS   -> SYSCLK: time.time() → sys_time
+TS   -> TS    : offset = sys_time – gps_time\noffset = –21735 s (–6 h)
+
+alt |offset| > 0.1 s (100 ms threshold)
+  TS -> SYSCLK  : timedatectl set-time\n'2026-07-06 14:32:15'
+  SYSCLK --> TS : clock adjusted
+  TS -> SD      : log "Clock corrected +6.03 h at 14:32:15Z"\nto /blackbox/logs/gps.log
+  TS -> TS      : last_sync_time = now()\nlast_sync_gps_time = gps_time\noffset_ms = 0
+  note over SYSCLK
+    All subsequent video chunks and
+    GPS CSV rows will now carry the
+    correct UTC timestamp.
+  end note
+else |offset| ≤ 0.1 s (clock already accurate)
+  TS --> GPSS   : no adjustment needed
+end
+
+== PHASE 2 – CONTINUOUS DRIFT MONITORING (every ~60 s) ==
+
+loop Every GPS fix received (~1 Hz) – drift sampled every 60 s
+  GMOD --> GPSS  : $GPRMC sentence (1 Hz)
+  GPSS -> TS     : sample_gps(sentence)
+  TS   -> TS     : gps_elapsed  = gps_time  – last_sync_gps_time\n                  sys_elapsed  = sys_time  – last_sync_time\n                  drift_ppm    = (sys_elapsed – gps_elapsed)\n                                 / gps_elapsed × 1 000 000
+  TS   -> SD     : log drift_ppm every 60 s
+
+  alt |drift_ppm| > 16 667 ppm  (i.e., > 1 s per 60 s)
+    note over TS
+      Resync trigger:
+      1 second drift over 60 seconds
+      corresponds to a clock error
+      of 16,667 parts-per-million.
+    end note
+    TS -> SYSCLK  : timedatectl set-time <gps_time>
+    SYSCLK --> TS : clock resynced
+    TS -> TS      : reset last_sync_time\nreset last_sync_gps_time
+    TS -> SD      : log "Clock resynced (drift=X ppm)"\nto /blackbox/logs/gps.log
+  else drift within tolerance
+    TS -> TS      : update last_sync_time\nupdate last_sync_gps_time
+  end
+end
+
+== PHASE 3 – SCHEDULED FULL RESYNC (every 60 min) ==
+
+note over TS
+  Even without exceeding the
+  drift threshold, a full resync
+  is performed every 60 minutes
+  as a preventive measure.
+end note
+
+TS -> SYSCLK  : timedatectl set-time <latest_gps_time>
+SYSCLK --> TS : clock resynced
+TS -> SD      : log "Scheduled resync at HH:MM:SSZ"
+
+@enduml

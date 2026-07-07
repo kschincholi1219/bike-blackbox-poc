@@ -1,0 +1,197 @@
+@startuml software-services
+!theme plain
+title Bike Black Box – Software Services Architecture
+skinparam backgroundColor #FAFAFA
+skinparam classBackgroundColor #E8F4FD
+skinparam classBorderColor #2980B9
+skinparam packageBackgroundColor #F4F6F7
+skinparam packageBorderColor #95A5A6
+
+' ──────────────────────────────────────────
+' INTERFACES
+' ──────────────────────────────────────────
+interface IService {
+  + start() : void
+  + stop() : void
+  + is_running : bool
+}
+
+interface IStorageConsumer {
+  + on_new_chunk(camera, filename, size_mb) : void
+}
+
+interface IHealthMonitor {
+  + heartbeat(service_name) : void
+  + check_health() : dict
+}
+
+' ──────────────────────────────────────────
+' MAIN ORCHESTRATOR
+' ──────────────────────────────────────────
+class MainOrchestrator {
+  - services : dict
+  - logger : Logger
+  --
+  + main() : void
+  + setup_logging() : void
+  + start_all_services() : void
+  + shutdown_all_services() : void
+}
+
+' ──────────────────────────────────────────
+' CAMERA SERVICES
+' ──────────────────────────────────────────
+class FrontCameraService {
+  - device_path : str = "/dev/video0"
+  - target_fps : int = 30
+  - bitrate_mbps : int = 5
+  - cap : VideoCapture
+  - frame_queue : deque(maxlen=10)
+  - stats : dict
+  --
+  + start() : void
+  + stop() : void
+  + get_frame() : dict
+  + get_stats() : dict
+  - _capture_loop() : void
+  - _open_device() : void
+}
+
+class RearCameraService {
+  - device_path : str = "/dev/video1"
+  - target_fps : int = 30
+  - bitrate_mbps : int = 5
+  - cap : VideoCapture
+  - frame_queue : deque(maxlen=10)
+  - stats : dict
+  --
+  + start() : void
+  + stop() : void
+  + get_frame() : dict
+  + get_stats() : dict
+  - _capture_loop() : void
+  - _open_device() : void
+}
+
+note right of RearCameraService
+  Identical to FrontCameraService
+  but targets /dev/video1
+end note
+
+' ──────────────────────────────────────────
+' GPS LOGGER SERVICE
+' ──────────────────────────────────────────
+class GPSLoggerService {
+  - uart_port : str = "/dev/ttyUSB0"
+  - baud : int = 9600
+  - csv_path : str = "/blackbox/gps/"
+  - ser : Serial
+  - gps_queue : deque(maxlen=100)
+  - csv_writer : DictWriter
+  - stats : dict
+  --
+  + start() : void
+  + stop() : void
+  + get_latest_fix() : dict
+  - _ingest_loop() : void
+  - _parse_nmea(sentence) : dict
+  - _flush_csv() : void
+  - _dms_to_decimal(dms, dir) : float
+}
+
+' ──────────────────────────────────────────
+' STORAGE MANAGER SERVICE
+' ──────────────────────────────────────────
+class StorageManagerService {
+  - base_path : Path = /blackbox/
+  - threshold_mb : int = 2500
+  - front_files : list
+  - rear_files : list
+  - stats : dict
+  --
+  + start() : void
+  + stop() : void
+  + on_new_chunk(camera, filename, size_mb) : void
+  - _find_oldest_file() : tuple
+  - _delete_file(filepath) : void
+  - _log_usage(total_mb) : void
+  - _check_disk_usage() : float
+}
+
+' ──────────────────────────────────────────
+' WATCHDOG SERVICE
+' ──────────────────────────────────────────
+class WatchdogService {
+  - services : dict
+  - timeout_sec : int = 30
+  - last_heartbeat : dict
+  - monitor_thread : Thread
+  --
+  + start() : void
+  + stop() : void
+  + heartbeat(service_name) : void
+  + check_health() : dict
+  - _monitor_loop() : void
+  - _emergency_shutdown() : void
+}
+
+' ──────────────────────────────────────────
+' RECOVERY MANAGER
+' ──────────────────────────────────────────
+class RecoveryManager {
+  - base_path : Path = /blackbox/
+  --
+  + check_unclean_shutdown() : bool
+  + validate_video_files() : list
+  + validate_gps_logs() : list
+  + create_recovery_lock() : void
+  + remove_recovery_lock() : void
+  + save_last_boot_time() : void
+  - _is_valid_mp4(filepath) : bool
+}
+
+' ──────────────────────────────────────────
+' TIME SYNC
+' ──────────────────────────────────────────
+class TimeSync {
+  - last_sync_time : float
+  - last_sync_gps_time : float
+  - offset_ms : float
+  --
+  + sample_gps(sentence) : void
+  + resync_clock(gps_time) : void
+  - _calculate_drift_ppm() : float
+}
+
+' ──────────────────────────────────────────
+' RELATIONSHIPS
+' ──────────────────────────────────────────
+IService <|.. FrontCameraService
+IService <|.. RearCameraService
+IService <|.. GPSLoggerService
+IService <|.. StorageManagerService
+IService <|.. WatchdogService
+
+IStorageConsumer <|.. StorageManagerService
+
+IHealthMonitor <|.. WatchdogService
+
+MainOrchestrator --> FrontCameraService   : manages
+MainOrchestrator --> RearCameraService    : manages
+MainOrchestrator --> GPSLoggerService     : manages
+MainOrchestrator --> StorageManagerService : manages
+MainOrchestrator --> WatchdogService      : manages
+MainOrchestrator --> RecoveryManager      : calls on boot
+
+FrontCameraService  --> StorageManagerService : on_new_chunk(front)
+RearCameraService   --> StorageManagerService : on_new_chunk(rear)
+GPSLoggerService    --> StorageManagerService : on_new_chunk(gps)
+
+WatchdogService --> FrontCameraService    : monitors heartbeat
+WatchdogService --> RearCameraService     : monitors heartbeat
+WatchdogService --> GPSLoggerService      : monitors heartbeat
+WatchdogService --> StorageManagerService : monitors heartbeat
+
+GPSLoggerService --> TimeSync : delegates clock sync
+
+@enduml

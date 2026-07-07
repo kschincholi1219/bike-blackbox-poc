@@ -8,8 +8,17 @@
 3. **[Storage & Data Design](03-STORAGE-DATA-DESIGN.md)** – Video encoding, circular buffer, GPS schema
 4. **[Software Architecture](04-SOFTWARE-ARCHITECTURE.md)** – Modular services, capture pipelines, recovery logic
 
+### UML Architecture Diagrams
+5. **[Architecture Diagrams](ARCHITECTURE-DIAGRAMS.md)** – PlantUML component, sequence, state, and data-flow diagrams
+   - [`diagrams/system-architecture.puml`](diagrams/system-architecture.puml) – Component model
+   - [`diagrams/software-services.puml`](diagrams/software-services.puml) – Class/component diagram
+   - [`diagrams/data-flow-pipelines.puml`](diagrams/data-flow-pipelines.puml) – Capture + storage flows
+   - [`diagrams/boot-recovery-sequence.puml`](diagrams/boot-recovery-sequence.puml) – Boot recovery lifecycle
+   - [`diagrams/circular-buffer-state.puml`](diagrams/circular-buffer-state.puml) – Buffer state machine
+   - [`diagrams/time-sync-sequence.puml`](diagrams/time-sync-sequence.puml) – GPS clock sync sequence
+
 ### Platform Analysis
-5. **[ESP32-P4 Analysis](ESP32-P4-ANALYSIS.md)** – Viability, power efficiency, comparison with RPi/Jetson
+6. **[ESP32-P4 Analysis](ESP32-P4-ANALYSIS.md)** – Viability, power efficiency, comparison with RPi/Jetson
 
 ### Implementation & Testing
 6. **[Implementation Roadmap](#coming-soon)** – Phased milestones, effort estimates, BOM
@@ -91,12 +100,20 @@
 
 ```
 repo/
-├── README.md                           (this file)
+├── README.md                           (project overview + diagram links)
 ├── docs/
 │   ├── 01-EXECUTIVE-SUMMARY.md         ← Start here
 │   ├── 02-SYSTEM-ARCHITECTURE.md       ← Hardware & platforms
 │   ├── 03-STORAGE-DATA-DESIGN.md       ← Encoding & retention
 │   ├── 04-SOFTWARE-ARCHITECTURE.md     ← Code structure & pseudocode
+│   ├── ARCHITECTURE-DIAGRAMS.md        ← UML diagrams (PlantUML)
+│   ├── diagrams/
+│   │   ├── system-architecture.puml    ← Component model
+│   │   ├── software-services.puml      ← Class/component diagram
+│   │   ├── data-flow-pipelines.puml    ← Capture & storage flows
+│   │   ├── boot-recovery-sequence.puml ← Boot recovery lifecycle
+│   │   ├── circular-buffer-state.puml  ← Buffer state machine
+│   │   └── time-sync-sequence.puml     ← GPS clock sync sequence
 │   ├── 05-IMPLEMENTATION-ROADMAP.md    ← Phases & milestones (coming soon)
 │   ├── 06-RISKS-MITIGATION.md          ← Failure modes & solutions (coming soon)
 │   ├── 07-VALIDATION-TEST-PLAN.md      ← Test checklist (coming soon)
