@@ -1,0 +1,139 @@
+@startuml boot-recovery-sequence
+!theme plain
+title Bike Black Box – Boot-Time Recovery & Graceful Shutdown Sequence
+skinparam backgroundColor #FAFAFA
+skinparam sequenceArrowColor #2C3E50
+skinparam sequenceLifeLineBorderColor #2980B9
+skinparam sequenceParticipantBackgroundColor #E8F4FD
+skinparam sequenceParticipantBorderColor #2980B9
+skinparam noteBackgroundColor #FEF9E7
+skinparam noteBorderColor #F39C12
+skinparam sequenceGroupBackgroundColor #F4F6F7
+
+autonumber
+
+participant "systemd" as SYS
+participant "main.py\n(MainOrchestrator)" as MAIN
+participant "RecoveryManager\n(recovery.py)" as REC
+participant "SD Card\n(/blackbox/state/)" as SD
+participant "FrontCameraService\n(front_camera.py)" as FCS
+participant "RearCameraService\n(rear_camera.py)" as RCS
+participant "GPSLoggerService\n(gps_logger.py)" as GPSS
+participant "StorageManagerService\n(storage_mgr.py)" as SMS
+participant "WatchdogService\n(watchdog.py)" as WDS
+
+== SYSTEM BOOT ==
+
+SYS  -> MAIN : ExecStart (systemd unit)
+MAIN -> MAIN : setup_logging()\nRotating FileHandler → /blackbox/logs/
+MAIN -> REC  : check_unclean_shutdown()
+REC  -> SD   : read /state/recovery.lock
+
+alt Unclean shutdown detected (lock exists)
+  SD  --> REC  : lock file present\n(previous boot did not clean up)
+  REC --> MAIN : unclean=True
+  MAIN -> REC  : validate_video_files()
+  REC  -> SD   : glob /video/**/*.mp4
+  SD  --> REC  : list of MP4 files
+  REC  -> REC  : _is_valid_mp4(each file)\n(check ftyp header, size > 1 MB)
+
+  alt Corrupted files found
+    REC --> MAIN : corrupted=[file1, file2, ...]
+    MAIN -> SD  : log corrupted filenames\nto /logs/recovery.log
+    note over MAIN
+      Corrupted files are logged but
+      not automatically deleted –
+      preserved for forensic review
+    end note
+  else All video files valid
+    REC --> MAIN : corrupted=[]
+  end
+
+  MAIN -> REC  : validate_gps_logs()
+  REC  -> SD   : glob /gps/*.csv
+  REC  -> REC  : check line count > 1\n(skip empty files)
+  REC --> MAIN : gps_issues list
+
+else Clean shutdown (no lock)
+  SD  --> REC  : lock file absent
+  REC --> MAIN : unclean=False
+  note over MAIN
+    Normal startup – skip validation
+  end note
+end
+
+== SERVICE INITIALISATION ==
+
+MAIN -> REC  : create_recovery_lock()
+REC  -> SD   : write /state/recovery.lock\n(timestamp of this boot)
+
+MAIN -> SMS  : start()
+SMS  -> SD   : scan /video/front/*.mp4\n(rebuild front_files list)
+SMS  -> SD   : scan /video/rear/*.mp4\n(rebuild rear_files list)
+SMS --> MAIN : ready
+
+MAIN -> GPSS : start()
+GPSS -> GPSS : open UART /dev/ttyUSB0\n9600 baud, timeout=1s
+GPSS --> MAIN : ready
+
+MAIN -> FCS  : start()
+FCS  -> FCS  : open V4L2 /dev/video0\n1280×720 @ 30 fps
+FCS --> MAIN : ready
+
+MAIN -> RCS  : start()
+RCS  -> RCS  : open V4L2 /dev/video1\n1280×720 @ 30 fps
+RCS --> MAIN : ready
+
+MAIN -> WDS  : start()
+WDS  -> WDS  : init heartbeat map\n(all services, now())
+WDS --> MAIN : monitoring
+
+MAIN -> REC  : save_last_boot_time()
+REC  -> SD   : write /state/last_boot.txt
+
+note over MAIN
+  System is now fully operational.
+  All services run in background threads.
+end note
+
+== NORMAL OPERATION (steady state) ==
+
+loop Every 5 seconds
+  WDS -> FCS  : check is_running
+  WDS -> RCS  : check is_running
+  WDS -> GPSS : check is_running
+  WDS -> SMS  : check is_running
+end
+
+loop Every 1 minute (FCS / RCS)
+  FCS -> SMS  : on_new_chunk(front, filename, size_mb)
+  RCS -> SMS  : on_new_chunk(rear, filename, size_mb)
+  SMS -> SMS  : check total_mb vs threshold
+  SMS -> SD   : delete oldest chunk if needed
+end
+
+== GRACEFUL SHUTDOWN (SIGTERM / SIGINT) ==
+
+SYS  -> MAIN : SIGTERM (systemctl stop / reboot)
+MAIN -> FCS  : stop()
+FCS  -> FCS  : is_running = False\ncapture_thread.join(timeout=2)
+FCS  --> MAIN: stopped
+MAIN -> RCS  : stop()
+RCS  --> MAIN: stopped
+MAIN -> GPSS : stop()
+GPSS -> GPSS : _flush_csv() – write buffered GPS data
+GPSS -> GPSS : csv_file.close()\nser.close()
+GPSS --> MAIN: stopped
+MAIN -> SMS  : stop()
+SMS  --> MAIN: stopped
+MAIN -> WDS  : stop()
+WDS  --> MAIN: stopped
+MAIN -> REC  : remove_recovery_lock()
+REC  -> SD   : unlink /state/recovery.lock
+note over SD
+  Lock removed = clean shutdown recorded.
+  Next boot will skip validation.
+end note
+MAIN -> SYS  : os._exit(0)
+
+@enduml

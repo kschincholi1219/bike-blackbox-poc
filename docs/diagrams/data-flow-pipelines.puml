@@ -1,0 +1,113 @@
+@startuml data-flow-pipelines
+!theme plain
+title Bike Black Box – Data Flow Pipelines
+skinparam backgroundColor #FAFAFA
+skinparam activityBackgroundColor #E8F4FD
+skinparam activityBorderColor #2980B9
+skinparam arrowColor #2C3E50
+skinparam noteBackgroundColor #FEF9E7
+skinparam noteBorderColor #F39C12
+
+left to right direction
+
+' ──────────────────────────────────────────
+' ACTORS / SOURCES
+' ──────────────────────────────────────────
+actor "Front Camera\n(USB /dev/video0)" as FCAM #E8F4FD
+actor "Rear Camera\n(USB /dev/video1)" as RCAM #E8F4FD
+actor "GPS Module\n(UART /dev/ttyUSB0)" as GMOD #EAF7EA
+
+' ──────────────────────────────────────────
+' VIDEO CAPTURE PIPELINE
+' ──────────────────────────────────────────
+package "Video Capture Pipeline" #FDEDEC {
+  component [V4L2 Driver\nopen /dev/videoN\nset 1280×720, 30 fps] as V4L2DRV
+  component [Frame Queue\ndeque(maxlen=10)\nFIFO frame buffer] as FQUEUE
+  component [H.264 HW Encoder\n(MMAL / VideoCore VI)\n5 Mbps bitrate] as ENC
+  component [MP4 Muxer\n(FFmpeg)\n1-minute segment] as MUX
+}
+
+' ──────────────────────────────────────────
+' GPS INGEST PIPELINE
+' ──────────────────────────────────────────
+package "GPS Ingest Pipeline" #EAF7EA {
+  component [pyserial\nserial.readline()\n9600 baud, 1 Hz] as PSRL
+  component [NMEA Parser\n$GPRMC / $GPGGA\ndecimal lat/lon] as NMEA
+  component [GPS Buffer\ndeque(maxlen=100)\nflush every 10 fixes] as GBUF
+  component [CSV Writer\nhourly rotation\nISO-8601 timestamps] as CSVW
+}
+
+' ──────────────────────────────────────────
+' STORAGE MANAGEMENT FLOW
+' ──────────────────────────────────────────
+package "Storage Management" #F4ECF7 {
+  component [StorageManager\n.on_new_chunk()] as SMGR
+  component [Disk Usage Monitor\ndu /blackbox/video/\ncheck vs 2.5 GB threshold] as DUM
+  component [Oldest-File Finder\nsorted by timestamp\nfront + rear lists] as OFF
+  component [Atomic Deleter\nrename → .deleting\nthen os.remove()] as ADEL
+  component [State Logger\ndisk_usage.json\n/blackbox/state/] as SLOG
+}
+
+' ──────────────────────────────────────────
+' PERSISTENT STORAGE
+' ──────────────────────────────────────────
+database "SD Card (/blackbox/)" #FEF9E7 {
+  component [/video/front/\nYYYY-MM-DD_HH-MM-SS.mp4] as VFD
+  component [/video/rear/\nYYYY-MM-DD_HH-MM-SS.mp4] as VRD
+  component [/gps/\nYYYY-MM-DD_HH.csv] as GFILED
+  component [/state/\ndisk_usage.json] as STFILED
+}
+
+' ──────────────────────────────────────────
+' CONNECTIONS – VIDEO PIPELINE
+' ──────────────────────────────────────────
+FCAM --> V4L2DRV : raw YUV frames\n(USB 3.0)
+RCAM --> V4L2DRV : raw YUV frames\n(USB 3.0)
+V4L2DRV --> FQUEUE : cap.read() → frame_info
+FQUEUE  --> ENC    : dequeue frame
+ENC     --> MUX    : H.264 bitstream
+MUX     --> VFD    : write .mp4 (front)
+MUX     --> VRD    : write .mp4 (rear)
+MUX     --> SMGR   : on_new_chunk(size_mb)
+
+note top of ENC
+  VideoCore VI reduces
+  CPU from ~60 % to ~15 %
+  per camera stream
+end note
+
+' ──────────────────────────────────────────
+' CONNECTIONS – GPS PIPELINE
+' ──────────────────────────────────────────
+GMOD --> PSRL  : NMEA sentences\n(UART 9600 baud)
+PSRL --> NMEA  : raw NMEA string
+NMEA --> GBUF  : parsed GPS fix dict
+GBUF --> CSVW  : flush on 10 fixes\nor 10-second timeout
+CSVW --> GFILED : append row to .csv
+CSVW --> SMGR   : on_new_chunk(gps)
+
+note top of NMEA
+  Filters: $GPRMC, $GPGGA
+  Converts DMS → decimal degrees
+  Validates fix status (A = active)
+end note
+
+' ──────────────────────────────────────────
+' CONNECTIONS – STORAGE MANAGEMENT
+' ──────────────────────────────────────────
+SMGR --> DUM   : calculate total_mb
+DUM  --> OFF   : total_mb > 2500 MB?
+OFF  --> ADEL  : (camera, filepath, size)
+ADEL --> VFD   : delete oldest front chunk
+ADEL --> VRD   : delete oldest rear chunk
+SMGR --> SLOG  : update disk_usage.json
+SLOG --> STFILED : persist state
+
+note bottom of ADEL
+  Atomic delete sequence:
+  1. rename file → file.deleting
+  2. os.remove(file.deleting)
+  Prevents partial-delete on power loss
+end note
+
+@enduml

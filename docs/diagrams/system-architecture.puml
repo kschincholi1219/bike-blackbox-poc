@@ -1,0 +1,134 @@
+@startuml system-architecture
+!theme plain
+title Bike Black Box – System Architecture (Component Model)
+skinparam componentStyle rectangle
+skinparam backgroundColor #FAFAFA
+skinparam component {
+  BackgroundColor #E8F4FD
+  BorderColor #2980B9
+  FontColor #1A252F
+}
+skinparam node {
+  BackgroundColor #EAF7EA
+  BorderColor #27AE60
+}
+skinparam database {
+  BackgroundColor #FEF9E7
+  BorderColor #F39C12
+}
+skinparam interface {
+  BackgroundColor #FDEDEC
+  BorderColor #E74C3C
+}
+
+' ──────────────────────────────────────────
+' EXTERNAL SENSORS & MODULES
+' ──────────────────────────────────────────
+package "External Sensors & Modules" {
+  component [Front Camera\n(USB UVC)\n1080p / 30 fps\nH.264 stream] as FrontCam
+  component [Rear Camera\n(USB UVC)\n1080p / 30 fps\nH.264 stream] as RearCam
+  component [GPS Module\n(u-blox M8N)\n1 Hz NMEA\n±5 m accuracy] as GPS
+}
+
+' ──────────────────────────────────────────
+' COMPUTE CORE – Raspberry Pi 4B (8 GB)
+' ──────────────────────────────────────────
+node "Compute Core\n(Raspberry Pi 4B – 8 GB RAM)" {
+
+  package "Operating System (Linux / Ubuntu 20.04)" {
+
+    package "Middleware & Driver Layer" {
+      component [V4L2 / libcamera\nVideo Capture Driver] as V4L2
+      component [pyserial\nUART Driver] as PySerial
+      component [H.264 HW Encoder\n(MMAL / VideoCore VI)] as HWEncoder
+    }
+
+    package "Application Layer (Python 3)" {
+      component [FrontCameraService\n(front_camera.py)\n15 % CPU · 100 MB] as FCS
+      component [RearCameraService\n(rear_camera.py)\n15 % CPU · 100 MB] as RCS
+      component [GPSLoggerService\n(gps_logger.py)\n2 % CPU · 20 MB] as GPSS
+      component [StorageManagerService\n(storage_mgr.py)\n5 % CPU · 50 MB] as SMS
+      component [WatchdogService\n(watchdog.py)\n1 % CPU · 10 MB] as WDS
+      component [MainOrchestrator\n(main.py)] as MAIN
+      component [RecoveryManager\n(recovery.py)] as RECOV
+    }
+
+    component [systemd\n(service management)] as SYSTEMD
+  }
+}
+
+' ──────────────────────────────────────────
+' PERSISTENT STORAGE
+' ──────────────────────────────────────────
+database "SD Card\n(256 GB · ext4 journaled)\n/blackbox/" {
+  component [/video/front/\n*.mp4 (1-min chunks)] as VF
+  component [/video/rear/\n*.mp4 (1-min chunks)] as VR
+  component [/gps/\n*.csv (hourly rotation)] as GPSF
+  component [/logs/\n*.log] as LOGF
+  component [/state/\nrecovery.lock\ndisk_usage.json] as STATEF
+}
+
+' ──────────────────────────────────────────
+' INTERFACES
+' ──────────────────────────────────────────
+interface "USB 3.0\n(high-bandwidth)" as USB_F
+interface "USB 3.0\n(high-bandwidth)" as USB_R
+interface "UART\n(/dev/ttyUSB0\n9600 baud)" as UART_I
+interface "SD Card\n(µSD / USB adapter)" as SDIF
+
+' ──────────────────────────────────────────
+' CONNECTIONS
+' ──────────────────────────────────────────
+FrontCam  --> USB_F      : USB 3.0 video stream
+USB_F     --> V4L2       : V4L2 device /dev/video0
+RearCam   --> USB_R      : USB 3.0 video stream
+USB_R     --> V4L2       : V4L2 device /dev/video1
+GPS       --> UART_I     : NMEA sentences
+UART_I    --> PySerial   : serial.readline()
+
+V4L2      --> FCS        : frames (front)
+V4L2      --> RCS        : frames (rear)
+PySerial  --> GPSS       : NMEA data
+
+FCS       --> HWEncoder  : raw frames → H.264
+RCS       --> HWEncoder  : raw frames → H.264
+
+FCS       --> SMS        : notify new chunk (front)
+RCS       --> SMS        : notify new chunk (rear)
+GPSS      --> SMS        : GPS file written
+
+SMS       --> SDIF       : write / delete video & GPS
+SDIF      --> VF         : /video/front/*.mp4
+SDIF      --> VR         : /video/rear/*.mp4
+SDIF      --> GPSF       : /gps/*.csv
+SDIF      --> STATEF     : /state/disk_usage.json
+
+WDS       --> FCS        : heartbeat check
+WDS       --> RCS        : heartbeat check
+WDS       --> GPSS       : heartbeat check
+WDS       --> SMS        : heartbeat check
+
+MAIN      --> FCS        : start / stop
+MAIN      --> RCS        : start / stop
+MAIN      --> GPSS       : start / stop
+MAIN      --> SMS        : start / stop
+MAIN      --> WDS        : start / stop
+MAIN      --> RECOV      : run on boot
+
+RECOV     --> STATEF     : read/write recovery.lock
+SYSTEMD   --> MAIN       : ExecStart / Restart
+
+note right of HWEncoder
+  VideoCore VI hardware
+  H.264 encoder reduces
+  CPU from ~60 % → 15 %
+  per camera stream
+end note
+
+note bottom of SMS
+  Circular buffer: 2.5 GB threshold
+  Deletes oldest 1-min chunk when
+  threshold exceeded (keeps ~1 hr)
+end note
+
+@enduml
